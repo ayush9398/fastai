@@ -5,12 +5,12 @@ import spacy
 from spacy.symbols import ORTH
 
 __all__ = ['BaseTokenizer', 'SpacyTokenizer', 'Tokenizer', 'Vocab', 'fix_html', 'replace_all_caps', 'replace_rep', 'replace_wrep',
-           'rm_useless_spaces', 'spec_add_spaces', 'BOS', 'FLD', 'UNK', 'PAD', 'TK_MAJ', 'TK_UP', 'TK_REP', 'TK_REP', 'TK_WREP',
+           'rm_useless_spaces', 'spec_add_spaces', 'BOS', 'EOS', 'FLD', 'UNK', 'PAD', 'TK_MAJ', 'TK_UP', 'TK_REP', 'TK_REP', 'TK_WREP',
            'deal_caps']
 
-BOS,FLD,UNK,PAD = 'xxbos','xxfld','xxunk','xxpad'
+BOS,EOS,FLD,UNK,PAD = 'xxbos','xxeos','xxfld','xxunk','xxpad'
 TK_MAJ,TK_UP,TK_REP,TK_WREP = 'xxmaj','xxup','xxrep','xxwrep'
-defaults.text_spec_tok = [UNK,PAD,BOS,FLD,TK_MAJ,TK_UP,TK_REP,TK_WREP]
+defaults.text_spec_tok = [UNK,PAD,BOS,EOS,FLD,TK_MAJ,TK_UP,TK_REP,TK_WREP]
 
 
 class BaseTokenizer():
@@ -22,7 +22,7 @@ class BaseTokenizer():
 class SpacyTokenizer(BaseTokenizer):
     "Wrapper around a spacy tokenizer to make it a `BaseTokenizer`."
     def __init__(self, lang:str):
-        self.tok = spacy.blank(lang)
+        self.tok = spacy.blank(lang, disable=["parser","tagger","ner"])
 
     def tokenizer(self, t:str) -> List[str]:
         return [t.text for t in self.tok.tokenizer(t)]
@@ -65,15 +65,15 @@ def fix_html(x:str) -> str:
     return re1.sub(' ', html.unescape(x))
 
 def replace_all_caps(x:Collection[str]) -> Collection[str]:
-    "Add `TK_UP` for words in all caps in `x`."
+    "Replace tokens in ALL CAPS in `x` by their lower version and add `TK_UP` before."
     res = []
     for t in x:
-        if t.isupper() and len(t) > 1: res.append(TK_UP)
-        res.append(t)
+        if t.isupper() and len(t) > 1: res.append(TK_UP); res.append(t.lower())
+        else: res.append(t)
     return res
 
 def deal_caps(x:Collection[str]) -> Collection[str]:
-    "Replace all words in `x` by their lower version and add `TK_MAJ`."
+    "Replace all Capitalized tokens in `x` by their lower version and add `TK_MAJ` before."
     res = []
     for t in x:
         if t == '': continue

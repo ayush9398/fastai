@@ -5,7 +5,7 @@ from .basic_data import *
 from .basic_train import *
 
 __all__ = ['BnFreeze', 'GradientClipping', 'ShowGraph', 'ClassificationInterpretation', 'fit_one_cycle', 'lr_find', 
-           'one_cycle_scheduler', 'to_fp16', 'to_fp32', 'mixup', 'AccumulateStepper']
+           'one_cycle_scheduler', 'to_fp16', 'to_fp32', 'mixup', 'AccumulateScheduler']
 
 def one_cycle_scheduler(lr_max:float, **kwargs:Any)->OneCycleScheduler:
     "Instantiate a `OneCycleScheduler` with `lr_max`."
@@ -13,7 +13,7 @@ def one_cycle_scheduler(lr_max:float, **kwargs:Any)->OneCycleScheduler:
 
 def fit_one_cycle(learn:Learner, cyc_len:int, max_lr:Union[Floats,slice]=defaults.lr,
                   moms:Tuple[float,float]=(0.95,0.85), div_factor:float=25., pct_start:float=0.3, final_div:float=None,
-                  wd:float=None, callbacks:Optional[CallbackList]=None, tot_epochs:int=None, start_epoch:int=1)->None:
+                  wd:float=None, callbacks:Optional[CallbackList]=None, tot_epochs:int=None, start_epoch:int=None)->None:
     "Fit a model following the 1cycle policy."
     max_lr = learn.lr_range(max_lr)
     callbacks = listify(callbacks)
@@ -31,13 +31,14 @@ def lr_find(learn:Learner, start_lr:Floats=1e-7, end_lr:Floats=10, num_it:int=10
     epochs = int(np.ceil(num_it/len(learn.data.train_dl)))
     learn.fit(epochs, start_lr, callbacks=[cb], wd=wd)
 
-def to_fp16(learn:Learner, loss_scale:float=None, max_noskip:int=1000, dynamic:bool=False, clip:float=None,
-            flat_master:bool=False)->Learner:
+def to_fp16(learn:Learner, loss_scale:float=None, max_noskip:int=1000, dynamic:bool=True, clip:float=None,
+            flat_master:bool=False, max_scale:float=2**24)->Learner:
     "Put `learn` in FP16 precision mode."
+    learn.to_fp32()
     learn.model = model2half(learn.model)
     learn.data.add_tfm(batch_to_half)
     learn.mp_cb = MixedPrecision(learn, loss_scale=loss_scale, max_noskip=max_noskip, dynamic=dynamic, clip=clip, 
-                                 flat_master=flat_master)
+                                 flat_master=flat_master, max_scale=max_scale)
     learn.callbacks.append(learn.mp_cb)
     return learn
 
@@ -51,7 +52,6 @@ def to_fp32(learn:Learner):
 
 def mixup(learn:Learner, alpha:float=0.4, stack_x:bool=False, stack_y:bool=True) -> Learner:
     "Add mixup https://arxiv.org/abs/1710.09412 to `learn`."
-    if stack_y: learn.loss_func = MixUpLoss(learn.loss_func)
     learn.callback_fns.append(partial(MixUpCallback, alpha=alpha, stack_x=stack_x, stack_y=stack_y))
     return learn
 
@@ -65,14 +65,14 @@ class ShowGraph(LearnerCallback):
     "Update a graph of learner stats and metrics after each epoch."
     def on_epoch_end(self, n_epochs:int, last_metrics:MetricsList, **kwargs)->bool:
         "If we have `last_metrics` plot them in our pbar graph"
-        if last_metrics is not None:
+        if last_metrics is not None and np.any(last_metrics):
             rec = self.learn.recorder
             iters = range_of(rec.losses)
             val_iter = np.array(rec.nb_batches).cumsum()
             x_bounds = (0, (n_epochs - len(rec.nb_batches)) * rec.nb_batches[-1] + len(rec.losses))
             y_bounds = (0, max((max(Tensor(rec.losses)), max(Tensor(rec.val_losses)))))
             rec.pbar.update_graph([(iters, rec.losses), (val_iter, rec.val_losses)], x_bounds, y_bounds)
-            return False
+        return {}
 
 class BnFreeze(LearnerCallback):
     "Freeze moving average statistics in all non-trainable batchnorm layers."
@@ -96,9 +96,9 @@ def clip_grad(learn:Learner, clip:float=0.1)->Learner:
     return learn
 Learner.clip_grad = clip_grad
      
-class AccumulateStepper(LearnerCallback):
+class AccumulateScheduler(LearnerCallback):
     "Does accumlated step every nth step by accumulating gradients"
-
+    
     def __init__(self, learn:Learner, n_step:int = 1, drop_last:bool = False):
         super().__init__(learn)
         self.n_step,self.drop_last = n_step,drop_last
@@ -123,11 +123,7 @@ class AccumulateStepper(LearnerCallback):
             for p in (self.learn.model.parameters()):
                 if p.requires_grad: p.grad.div_(self.acc_samples)
             self.acc_samples = 0
-        else: return True
-    
-    def on_step_end(self, **kwargs):
-        "zero gradients after stepping, True will result in no zeroing"
-        return (self.acc_batches % self.n_step) != 0
+        else: return {'skip_step':True, 'skip_zero':True}
     
     def on_epoch_end(self, **kwargs):
         "step the rest of the accumulated grads if not perfectly divisible"
@@ -162,13 +158,13 @@ class ClassificationInterpretation():
                 torch.add(cm, cm_slice, out=cm)
         return to_np(cm)
 
-    def plot_confusion_matrix(self, normalize:bool=False, title:str='Confusion matrix', cmap:Any="Blues", slice_size:int=1, 
-                              norm_dec:int=2, plot_txt:bool=True, **kwargs)->None:
+    def plot_confusion_matrix(self, normalize:bool=False, title:str='Confusion matrix', cmap:Any="Blues", slice_size:int=1,
+                              norm_dec:int=2, plot_txt:bool=True, return_fig:bool=None, **kwargs)->Optional[plt.Figure]:
         "Plot the confusion matrix, with `title` and using `cmap`."
         # This function is mainly copied from the sklearn docs
         cm = self.confusion_matrix(slice_size=slice_size)
         if normalize: cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-        plt.figure(**kwargs)
+        fig = plt.figure(**kwargs)
         plt.imshow(cm, interpolation='nearest', cmap=cmap)
         plt.title(title)
         tick_marks = np.arange(self.data.c)
@@ -179,12 +175,13 @@ class ClassificationInterpretation():
             thresh = cm.max() / 2.
             for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
                 coeff = f'{cm[i, j]:.{norm_dec}f}' if normalize else f'{cm[i, j]}'
-                plt.text(j, i, coeff, horizontalalignment="center", color="white" if cm[i, j] > thresh else "black")
+                plt.text(j, i, coeff, horizontalalignment="center", verticalalignment="center", color="white" if cm[i, j] > thresh else "black")
 
         plt.tight_layout()
         plt.ylabel('Actual')
         plt.xlabel('Predicted')
         plt.grid(False)
+        if ifnone(return_fig, defaults.return_fig): return fig
 
     def most_confused(self, min_val:int=1, slice_size:int=1)->Collection[Tuple[str,str,int]]:
         "Sorted descending list of largest non-diagonal entries of confusion matrix, presented as actual, predicted, number of occurrences."

@@ -30,13 +30,14 @@ Here are some ways that you can learn a lot about the library, whilst also contr
 
 #### Did you write a patch that fixes a bug?
 
-* Sign the [Contributor License Agreement](https://www.clahub.com/agreements/fastai/fastai).
 * Open a new GitHub pull request with the patch.
 * Ensure that your PR includes [tests](https://docs.fast.ai/dev/test.html) that fail without your patch, and pass with it.
 * Ensure the PR description clearly describes the problem and solution. Include the relevant issue number if applicable.
 * Before submitting, please be sure you abide by our [coding style](https://docs.fast.ai/dev/style.html) and [the guide on abbreviations](https://docs.fast.ai/dev/abbr.html) and clean-up your code accordingly.
 
 ## Do you intend to add a new feature or change an existing one?
+
+**Please take note that we are in the midst of making several breaking changes with the preparation of v1.1 so we suggest you wait a little bit before starting coding it.**
 
 * You can suggest your change on the [fastai forum](http://forums.fast.ai/) to see if others are interested or want to help. [This topic](http://forums.fast.ai/t/fastai-v1-adding-features/23041/8) lists the features that will be added to fastai in the foreseeable future. Be sure to read it too!
 * Before implementing a non-trivial new feature, first create a notebook version of your new feature, like those in [dev_nb](https://github.com/fastai/fastai_docs/tree/master/dev_nb). It should show step-by-step what your code is doing, and why, with the result of each step. Try to simplify the code as much as possible. When you're happy with it, let us know on the forum (include a link to gist with your notebook.)

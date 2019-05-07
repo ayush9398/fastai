@@ -28,6 +28,7 @@ OptRange = Optional[Tuple[float,float]]
 OptStrTuple = Optional[Tuple[str,str]]
 OptStats = Optional[Tuple[np.ndarray, np.ndarray]]
 PathOrStr = Union[Path,str]
+PathLikeOrBinaryStream = Union[PathOrStr, BufferedWriter, BytesIO]
 PBar = Union[MasterBar, ProgressBar]
 Point=Tuple[float,float]
 Points=Collection[Point]
@@ -37,7 +38,6 @@ StartOptEnd=Union[float,Tuple[float,float]]
 StrList = Collection[str]
 Tokens = Collection[Collection[str]]
 OptStrList = Optional[StrList]
-
 np.set_printoptions(precision=6, threshold=50, edgeitems=4, linewidth=120)
 
 def num_cpus()->int:
@@ -46,11 +46,12 @@ def num_cpus()->int:
     except AttributeError: return os.cpu_count()
 
 _default_cpus = min(16, num_cpus())
-defaults = SimpleNamespace(cpus=_default_cpus, cmap='viridis')
+defaults = SimpleNamespace(cpus=_default_cpus, cmap='viridis', return_fig=False, silent=False)
 
 def is_listy(x:Any)->bool: return isinstance(x, (tuple,list))
 def is_tuple(x:Any)->bool: return isinstance(x, tuple)
 def is_dict(x:Any)->bool: return isinstance(x, dict)
+def is_pathlike(x:Any)->bool: return isinstance(x, (str,Path))
 def noop(x): return x
 
 def chunks(l:Collection, n:int)->Iterable:
@@ -76,7 +77,7 @@ def uniqueify(x:Series, sort:bool=False)->List:
     if sort: res.sort()
     return res
 
-def idx_dict(a): 
+def idx_dict(a):
     "Create a dictionary value to index from `a`."
     return {v:k for k,v in enumerate(a)}
 
@@ -102,8 +103,12 @@ def random_split(valid_pct:float, *arrs:NPArrayableList)->SplitArrayList:
 def listify(p:OptListOrItem=None, q:OptListOrItem=None):
     "Make `p` listy and the same length as `q`."
     if p is None: p=[]
-    elif isinstance(p, str):          p=[p]
-    elif not isinstance(p, Iterable): p=[p]
+    elif isinstance(p, str):          p = [p]
+    elif not isinstance(p, Iterable): p = [p]
+    #Rank 0 tensors in PyTorch are Iterable but don't have a length.
+    else:
+        try: a = len(p)
+        except: p = [p]
     n = q if type(q)==int else len(p) if q is None else len(q)
     if len(p)==1: p = p * n
     assert len(p)==n, f'List len mismatch ({len(p)} vs {n})'
@@ -148,7 +153,7 @@ TfmList = Union[Callable, Collection[Callable]]
 class ItemBase():
     "Base item type in the fastai library."
     def __init__(self, data:Any): self.data=self.obj=data
-    def __repr__(self): return f'{self.__class__.__name__} {self}'
+    def __repr__(self)->str: return f'{self.__class__.__name__} {str(self)}'
     def show(self, ax:plt.Axes, **kwargs):
         "Subclass this method if you want to customize the way this `ItemBase` is shown on `ax`."
         ax.set_title(str(self))
@@ -156,7 +161,12 @@ class ItemBase():
         "Subclass this method if you want to apply data augmentation with `tfms` to this `ItemBase`."
         if tfms: raise Exception(f"Not implemented: you can't apply transforms to this type of item ({self.__class__.__name__})")
         return self
+    def __eq__(self, other): return recurse_eq(self.data, other.data)
 
+def recurse_eq(arr1, arr2):
+    if is_listy(arr1): return is_listy(arr2) and len(arr1) == len(arr2) and np.all([recurse_eq(x,y) for x,y in zip(arr1,arr2)])
+    else:              return np.all(np.atleast_1d(arr1 == arr2))
+        
 def download_url(url:str, dest:str, overwrite:bool=False, pbar:ProgressBar=None,
                  show_progress=True, chunk_size=1024*1024, timeout=4, retries=5)->None:
     "Download `url` to `dest` unless it exists and not `overwrite`."
@@ -190,10 +200,10 @@ def download_url(url:str, dest:str, overwrite:bool=False, pbar:ProgressBar=None,
             print(timeout_txt)
             import sys;sys.exit(1)
 
-def range_of(x):  
+def range_of(x):
     "Create a range from 0 to `len(x)`."
     return list(range(len(x)))
-def arange_of(x): 
+def arange_of(x):
     "Same as `range_of` but returns an array."
     return np.arange(len(x))
 
@@ -244,7 +254,7 @@ def func_args(func)->bool:
     code = func.__code__
     return code.co_varnames[:code.co_argcount]
 
-def has_arg(func, arg)->bool: 
+def has_arg(func, arg)->bool:
     "Check if `func` accepts `arg`."
     return arg in func_args(func)
 
@@ -266,22 +276,26 @@ class EmptyLabel(ItemBase):
     "Should be used for a dummy label."
     def __init__(self): self.obj,self.data = 0,0
     def __str__(self):  return ''
+    def __hash__(self): return hash(str(self))
 
 class Category(ItemBase):
     "Basic class for single classification labels."
     def __init__(self,data,obj): self.data,self.obj = data,obj
-    def __int__(self): return int(self.data)
-    def __str__(self): return str(self.obj)
+    def __int__(self):  return int(self.data)
+    def __str__(self):  return str(self.obj)
+    def __hash__(self): return hash(str(self))
 
 class MultiCategory(ItemBase):
     "Basic class for multi-classification labels."
     def __init__(self,data,obj,raw): self.data,self.obj,self.raw = data,obj,raw
-    def __str__(self): return ';'.join([str(o) for o in self.obj])
+    def __str__(self):  return ';'.join([str(o) for o in self.obj])
+    def __hash__(self): return hash(str(self))
 
 class FloatItem(ItemBase):
     "Basic class for float items."
     def __init__(self,obj): self.data,self.obj = np.array(obj).astype(np.float32),obj
-    def __str__(self): return str(self.obj)
+    def __str__(self):  return str(self.obj)
+    def __hash__(self): return hash(str(self))
 
 def _treat_html(o:str)->str:
     o = str(o)
@@ -306,11 +320,13 @@ def text2html_table(items:Collection[Collection[str]])->str:
 def parallel(func, arr:Collection, max_workers:int=None):
     "Call `func` on every element of `arr` in parallel using `max_workers`."
     max_workers = ifnone(max_workers, defaults.cpus)
-    if max_workers<2: _ = [func(o,i) for i,o in enumerate(arr)]
+    if max_workers<2: results = [func(o,i) for i,o in progress_bar(enumerate(arr), total=len(arr))]
     else:
         with ProcessPoolExecutor(max_workers=max_workers) as ex:
             futures = [ex.submit(func,o,i) for i,o in enumerate(arr)]
-            for f in progress_bar(concurrent.futures.as_completed(futures), total=len(arr)): pass
+            results = []
+            for f in progress_bar(concurrent.futures.as_completed(futures), total=len(arr)): results.append(f.result())
+    if any([o is not None for o in results]): return results
 
 def subplots(rows:int, cols:int, imgsize:int=4, figsize:Optional[Tuple[int,int]]=None, title=None, **kwargs):
     "Like `plt.subplots` but with consistent axs shape, `kwargs` passed to `fig.suptitle` with `title`"
@@ -327,3 +343,23 @@ def show_some(items:Collection, n_max:int=5, sep:str=','):
     res = sep.join([f'{o}' for o in items[:n_max]])
     if len(items) > n_max: res += '...'
     return res
+
+def get_tmp_file(dir=None):
+    "Create and return a tmp filename, optionally at a specific path. `os.remove` when done with it."
+    with tempfile.NamedTemporaryFile(delete=False, dir=dir) as f: return f.name
+
+def compose(funcs:List[Callable])->Callable:
+    "Compose `funcs`"
+    def compose_(funcs, x, *args, **kwargs):
+        for f in listify(funcs): x = f(x, *args, **kwargs)
+        return x
+    return partial(compose_, funcs)
+
+class PrettyString(str):
+    "Little hack to get strings to show properly in Jupyter."
+    def __repr__(self): return self
+    
+def float_or_x(x):
+    "Tries to convert to float, returns x if it can't"
+    try:   return float(x)
+    except:return x

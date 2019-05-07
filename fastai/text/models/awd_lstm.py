@@ -1,9 +1,12 @@
 from ...torch_core import *
 from ...layers import *
+from ...train import ClassificationInterpretation
+from ...basic_train import *
+from ...basic_data import *
 from ..data import TextClasDataBunch
 import matplotlib.cm as cm
 
-__all__ = ['EmbeddingDropout', 'LinearDecoder', 'PoolingLinearClassifier', 'AWD_LSTM', 'RNNDropout',
+__all__ = ['EmbeddingDropout', 'LinearDecoder', 'AWD_LSTM', 'RNNDropout',
            'SequentialRNN', 'WeightDropout', 'dropout_mask', 'awd_lstm_lm_split', 'awd_lstm_clas_split',
            'awd_lstm_lm_config', 'awd_lstm_clas_config', 'TextClassificationInterpretation']
 
@@ -87,11 +90,12 @@ class AWD_LSTM(nn.Module):
         self.encoder_dp = EmbeddingDropout(self.encoder, embed_p)
         if self.qrnn:
             #Using QRNN requires an installation of cuda
-            from .qrnn import QRNNLayer
-            self.rnns = [QRNNLayer(emb_sz if l == 0 else n_hid, n_hid if l != n_layers - 1 else emb_sz,
-                                   save_prev_x=True, zoneout=0, window=2 if l == 0 else 1, output_gate=True,
-                                   use_cuda=torch.cuda.is_available()) for l in range(n_layers)]
-            for rnn in self.rnns: rnn.linear = WeightDropout(rnn.linear, weight_p, layer_names=['weight'])
+            from .qrnn import QRNN
+            self.rnns = [QRNN(emb_sz if l == 0 else n_hid, n_hid if l != n_layers - 1 else emb_sz, 1,
+                              save_prev_x=True, zoneout=0, window=2 if l == 0 else 1, output_gate=True) 
+                         for l in range(n_layers)]
+            for rnn in self.rnns: 
+                rnn.layers[0].linear = WeightDropout(rnn.layers[0].linear, weight_p, layer_names=['weight'])
         else:
             self.rnns = [nn.LSTM(emb_sz if l == 0 else n_hid, (n_hid if l != n_layers - 1 else emb_sz)//self.n_dir, 1,
                                  batch_first=True, bidirectional=bidir) for l in range(n_layers)]
@@ -158,32 +162,6 @@ class SequentialRNN(nn.Sequential):
         for c in self.children():
             if hasattr(c, 'reset'): c.reset()
 
-class PoolingLinearClassifier(nn.Module):
-    "Create a linear classifier with pooling."
-
-    def __init__(self, layers:Collection[int], drops:Collection[float]):
-        super().__init__()
-        mod_layers = []
-        activs = [nn.ReLU(inplace=True)] * (len(layers) - 2) + [None]
-        for n_in,n_out,p,actn in zip(layers[:-1],layers[1:], drops, activs):
-            mod_layers += bn_drop_lin(n_in, n_out, p=p, actn=actn)
-        self.layers = nn.Sequential(*mod_layers)
-
-    def pool(self, x:Tensor, bs:int, is_max:bool):
-        "Pool the tensor along the seq_len dimension."
-        f = F.adaptive_max_pool1d if is_max else F.adaptive_avg_pool1d
-        return f(x.transpose(1,2), (1,)).view(bs,-1)
-
-    def forward(self, input:Tuple[Tensor,Tensor])->Tuple[Tensor,Tensor,Tensor]:
-        raw_outputs, outputs = input
-        output = outputs[-1]
-        bs,sl,_ = output.size()
-        avgpool = self.pool(output, bs, False)
-        mxpool = self.pool(output, bs, True)
-        x = torch.cat([output[:,-1], mxpool, avgpool], 1)
-        x = self.layers(x)
-        return x, raw_outputs, outputs
-
 def awd_lstm_lm_split(model:nn.Module) -> List[nn.Module]:
     "Split a RNN `model` in groups for differential learning rates."
     groups = [[rnn, dp] for rnn, dp in zip(model[0].rnns, model[0].hidden_dps)]
@@ -195,11 +173,11 @@ def awd_lstm_clas_split(model:nn.Module) -> List[nn.Module]:
     groups += [[rnn, dp] for rnn, dp in zip(model[0].module.rnns, model[0].module.hidden_dps)]
     return groups + [[model[1]]]
 
-awd_lstm_lm_config = dict(emb_sz=400, n_hid=1150, n_layers=3, pad_token=1, qrnn=False, bidir=False, output_p=0.25,
-                          hidden_p=0.1, input_p=0.2, embed_p=0.02, weight_p=0.15, tie_weights=True, out_bias=True)
+awd_lstm_lm_config = dict(emb_sz=400, n_hid=1150, n_layers=3, pad_token=1, qrnn=False, bidir=False, output_p=0.1,
+                          hidden_p=0.15, input_p=0.25, embed_p=0.02, weight_p=0.2, tie_weights=True, out_bias=True)
 
 awd_lstm_clas_config = dict(emb_sz=400, n_hid=1150, n_layers=3, pad_token=1, qrnn=False, bidir=False, output_p=0.4,
-                       hidden_p=0.2, input_p=0.6, embed_p=0.1, weight_p=0.5)
+                       hidden_p=0.3, input_p=0.4, embed_p=0.05, weight_p=0.5)
 
 def value2rgba(x:float, cmap:Callable=cm.RdYlGn, alpha_mult:float=1.0)->Tuple:
     "Convert a value `x` from 0 to 1 (inclusive) to an RGBA tuple according to `cmap` times transparency `alpha_mult`."
@@ -222,27 +200,34 @@ def show_piece_attn(*args, **kwargs):
     from IPython.display import display, HTML
     display(HTML(piece_attn_html(*args, **kwargs)))
 
-@dataclass
-class TextClassificationInterpretation():
+def _eval_dropouts(mod):
+        module_name =  mod.__class__.__name__
+        if 'Dropout' in module_name or 'BatchNorm' in module_name: mod.training = False
+        for module in mod.children(): _eval_dropouts(module)
+
+
+class TextClassificationInterpretation(ClassificationInterpretation):
     """Provides an interpretation of classification based on input sensitivity.
     This was designed for AWD-LSTM only for the moment, because Transformer already has its own attentional model.
     """
-    data: TextClasDataBunch
-    model: AWD_LSTM
 
-    @classmethod
-    def from_learner(cls, learn): return cls(learn.data, learn.model)
+    def __init__(self, learn: Learner, probs: Tensor, y_true: Tensor, losses: Tensor, ds_type: DatasetType = DatasetType.Valid):
+        super(TextClassificationInterpretation, self).__init__(learn,probs,y_true,losses,ds_type)
+        self.model = learn.model
 
     def intrinsic_attention(self, text:str, class_id:int=None):
         """Calculate the intrinsic attention of the input w.r.t to an output `class_id`, or the classification given by the model if `None`.
         For reference, see the Sequential Jacobian session at https://www.cs.toronto.edu/~graves/preprint.pdf
         """
-        ids = self.data.one_item(text)[0]
-        emb = self.model[0].module.encoder(ids).detach().requires_grad_(True)
-        self.model.eval()
+        self.model.train()
+        _eval_dropouts(self.model)
         self.model.zero_grad()
         self.model.reset()
-        cl = self.model[1](self.model[0].module(emb, from_embeddings=True))[0].softmax(dim=-1)
+        ids = self.data.one_item(text)[0]
+        emb = self.model[0].module.encoder(ids).detach().requires_grad_(True)
+        lstm_output = self.model[0].module(emb, from_embeddings=True)
+        self.model.eval()
+        cl = self.model[1](lstm_output + (torch.zeros_like(ids).byte(),))[0].softmax(dim=-1)
         if class_id is None: class_id = cl.argmax()
         cl[0][class_id].backward()
         attn = emb.grad.squeeze().abs().sum(dim=-1)
@@ -257,3 +242,28 @@ class TextClassificationInterpretation():
     def show_intrinsic_attention(self, text:str, class_id:int=None, **kwargs)->None:
         text, attn = self.intrinsic_attention(text, class_id)
         show_piece_attn(text.text.split(), to_np(attn), **kwargs)
+
+    def show_top_losses(self, k:int, max_len:int=70)->None:
+        """
+        Create a tabulation showing the first `k` texts in top_losses along with their prediction, actual,loss, and probability of
+        actual class. `max_len` is the maximum number of tokens displayed.
+        """
+        from IPython.display import display, HTML
+        items = []
+        tl_val,tl_idx = self.top_losses()
+        for i,idx in enumerate(tl_idx):
+            if k <= 0: break
+            k -= 1
+            tx,cl = self.data.dl(self.ds_type).dataset[idx]
+            cl = cl.data
+            classes = self.data.classes
+            txt = ' '.join(tx.text.split(' ')[:max_len]) if max_len is not None else tx.text
+            tmp = [txt, f'{classes[self.pred_class[idx]]}', f'{classes[cl]}', f'{self.losses[idx]:.2f}',
+                   f'{self.probs[idx][cl]:.2f}']
+            items.append(tmp)
+        items = np.array(items)
+        names = ['Text', 'Prediction', 'Actual', 'Loss', 'Probability']
+        df = pd.DataFrame({n:items[:,i] for i,n in enumerate(names)}, columns=names)
+        with pd.option_context('display.max_colwidth', -1):
+            display(HTML(df.to_html(index=False)))
+

@@ -1,8 +1,12 @@
 " Memory profiling callbacks "
 
-import tracemalloc, threading, torch, time, pynvml
+import tracemalloc, threading, torch, time
 from ..utils.mem import *
 from ..basic_train import *
+from ..torch_core import *
+from ..utils.pynvml_gate import *
+
+if use_gpu: pynvml = load_pynvml_env()
 
 class PeakMemMetric(LearnerCallback):
     "Callback that measures used and peaked general and GPU memory."
@@ -48,10 +52,14 @@ class PeakMemMetric(LearnerCallback):
         self.peak_monitor_start()
         self.gpu_before = gpu_mem_get_used_no_cache()
 
-    def on_epoch_end(self, **kwargs):
+    def on_epoch_end(self, last_metrics, **kwargs):
         cpu_used, cpu_peak =  list(map(lambda x: int(x/2**20), tracemalloc.get_traced_memory()))
+        self.peak_monitor_stop()
         gpu_used = gpu_mem_get_used_no_cache() - self.gpu_before
         gpu_peak = self.gpu_mem_used_peak      - self.gpu_before
-        self.peak_monitor_stop()
+        # can be negative, due to unreliable peak monitor thread
+        if gpu_peak < 0:   gpu_peak = 0
+        # since we want the overhead only, subtract delta used if it's positive
+        elif gpu_used > 0: gpu_peak -= gpu_used
         # The numbers are deltas in MBs (beginning of the epoch and the end)
-        self.learn.recorder.add_metrics([cpu_used, cpu_peak, gpu_used, gpu_peak])
+        return add_metrics(last_metrics, [cpu_used, cpu_peak, gpu_used, gpu_peak])

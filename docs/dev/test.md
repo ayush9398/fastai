@@ -55,6 +55,15 @@ Most of this document is various notes explaining how to do all kinds of things 
    Note that this guide helps you to write tests with a plain git checkout, without needing to fork and branch, so that you can get results faster and easier. But once you're ready, then switch to your own fork and branch as explained in the guide above. You can just copy the files over to the new branch. Of course, feel free, to start with making a PR branch first - whatever is the easiest for you.
 
 
+## Handy things
+
+Here is a bunch of useful pytest extensions to install (most are discussed somewhere in this document):
+```
+pip install pytest-xdist pytest-sugar pytest-repeat pytest-picked pytest-forked pytest-flakefinder pytest-cov nbsmoke
+```
+
+Only `pytest-sugar` will automatically change `pytest`'s behavior (in a nice way), so remove it from the list if you don't like it. All the other extensions need to be explicitly enabled via `pytest` flag to have an impact, so are safe to install.
+
 ## Automated tests
 
 At the moment there are only a few automated tests, so we need to start expanding it! It's not easy to properly automatically test ML code, but there's lots of opportunities for unit tests.
@@ -68,7 +77,13 @@ The tests have been configured to automatically run against the `fastai` directo
 
 ### Choosing which tests to run
 
-To run all the tests:
+[Full documentation](https://docs.pytest.org/en/latest/usage.html).
+
+For nuances of configuring pytest's repo-wide behavior see [collection](https://docs.pytest.org/en/latest/example/pythoncollection.html).
+
+Here are some most useful ways of running tests.
+
+#### Run all
 
    ```
    pytest
@@ -87,23 +102,15 @@ or:
    ```
 
 
-To skip the integration tests in order to do quick testing while you work:
-
-   ```
-   pytest --skipint
-   ```
-
-If you need to skip a certain test module temporarily you can either tell `pytest` which tests to run explicitly, so for example to skip any test modules that contain the string `link`, you could run:
-
-   ```
-   pytest `ls -1 tests/*py | grep -v link`
-   ```
+#### Run specific test module
 
 To run an individual test module:
 
    ```
    pytest tests/test_core.py
    ```
+
+#### Run specific tests
 
 Run tests by keyword expressions:
 
@@ -128,10 +135,67 @@ A more superior way, which avoids unintentional multiple matches is to use the t
    ```
 It's really just the test module followed by the specific test name, joined by `::`.
 
-More ways: https://docs.pytest.org/en/latest/usage.html
+#### Run only modified tests
 
-For nuances of configuring pytest's repo-wide behavior see [collection](https://docs.pytest.org/en/latest/example/pythoncollection.html).
+Run the tests related to the unstaged files or the current branch (according to Git).
 
+[pytest-picked](https://github.com/anapaulagomes/pytest-picked)
+
+```
+pip install pytest-picked
+```
+
+```
+pytest --picked
+```
+
+All tests will be run from files and folders which are modified, but not yet committed.
+
+
+#### Automatically rerun failed tests on source modification
+
+[pytest-xdist](https://github.com/pytest-dev/pytest-xdist) provides a very useful feature of detecting all failed tests, and then waiting for you to modify files and continuously re-rerun those failing tests until they pass while you fix them. So that you don't need to re start pytest after you made the fix. This is repeated until all tests pass after which again a full run is performed.
+
+   ```
+   pip install pytest-xdist
+   ```
+
+To enter the mode:
+   ```
+   pytest -f # or pytest --looponfail
+   ```
+
+File changes are detected by looking at looponfailingroots root directories and all of their contents (recursively). If the default for this value does not work for you you can change it in your project by setting a configuration option in `setup.cfg`:
+
+   ```
+   [tool:pytest]
+   looponfailroots = fastai tests
+   ```
+or `pytest.ini` or `tox.ini` files:
+   ```
+   [pytest]
+   looponfailroots = fastai tests
+   ```
+
+This would lead to only looking for file changes in the respective directories, specified relatively to the ini-file’s directory.
+
+[pytest-watch](https://github.com/joeyespo/pytest-watch) is an alternative implementation of this functionality.
+
+#### Skip integration tests
+
+To skip the integration tests in order to do quick testing while you work:
+
+   ```
+   pytest --skipint
+   ```
+
+#### Skip a test module
+
+If you need to skip a certain test module temporarily you can either tell `pytest` which tests to run explicitly, so for example to skip any test modules that contain the string `link`, you could run:
+
+   ```
+   pytest `ls -1 tests/*py | grep -v link`
+   ```
 
 
 ### Clearing state
@@ -157,7 +221,9 @@ This can speed up the total execution time of the test suite.
    ```
 That's twice the speed of the normal sequential execution!
 
-We just need to fix the temp files creation to use a unique string (pid?), otherwise at times some tests collide in a race condition over the same temp file path.
+XXX: We just need to fix the temp files creation to use a unique string (pid?), otherwise at times some tests collide in a race condition over the same temp file path.
+
+Since the order of executed tests is different and unpredictable, if running the test suite with `pytest-xdist` produces failures (meaning we have some undetected coupled tests), use  [pytest-replay](https://github.com/ESSS/pytest-replay) to replay the tests in the same order, which should help with then somehow reducing that failing sequence to a minimum. Currently there is *bisect*-like module that can reduce a long sequence of tests that leads to failure to the minimal one.
 
 
 ### Test order and repetition
@@ -185,6 +251,17 @@ Plugins:
    ```
    ```
    pytest --count=10 --repeat-scope=function tests
+   ```
+
+   Here is another similar module [pytest-flakefinder](https://github.com/dropbox/pytest-flakefinder):
+
+   ```
+   pip install pytest-flakefinder
+   ```
+
+   And then run every test multiple times (50 by default):
+   ```
+   pytest --flake-finder --flake-runs=5
    ```
 
 
@@ -237,6 +314,38 @@ Randomization alternatives:
 * [`pytest-randomly`](https://github.com/pytest-dev/pytest-randomly)
 
    This module has a very similar functionality/interface, but it doesn't have the bucket modes available in `pytest-random-order`. It has the same problem of imposing itself once installed.
+
+
+
+### Look and feel variations
+
+#### pytest-sugar
+
+[pytest-sugar](https://github.com/Frozenball/pytest-sugar) is a plugin that improves the look-n-feel, adds a progressbar, and show tests that fail and the assert instantly. It gets activated automatically upon installation.
+
+   ```
+   pip install pytest-sugar
+   ```
+
+To run tests without it, run:
+
+   ```
+   pytest -p no:sugar
+   ```
+
+or uninstall it.
+
+#### instantly shows failed tests
+
+[pytest-instafail](https://github.com/pytest-dev/pytest-instafail) shows failures and errors instantly instead of waiting until the end of test session.
+
+   ```
+   pip install pytest-instafail
+   ```
+
+   ```
+   pytest --instafail
+   ```
 
 
 ### To GPU or not to GPU
@@ -342,6 +451,8 @@ When writing tests:
 - Avoid pretrained models, since they have to be downloaded from the internet to run the test
 - Create some minimal data for your test, or use data already in repo's data/ directory
 
+Important: currently, in the test suite we can only use modules that are already in the required dependencies of fastai (i.e. conda dependencies). No other modules are allowed, unless the test is skipped if some new dependency is used.
+
 ### Test Registry
 
 `fastai` has a neat feature where users while reading the API documentation can also discover which tests exercise the function they are interested to use. This provides extra insights at how the API can be used, and also provides an incentive to users to write tests which are missing or improving the existing ones. Therefore, every new test should include a single call of `this_tests`.
@@ -365,6 +476,9 @@ def test_this_tests():
 
     # explicit fully qualified function as a string
     this_tests('fastai.gen_doc.doctest.this_tests')
+
+    # special case for cases where a test doesn't test fastai API
+    this_tests('na')
 
     # not a real function
     func = 'foo bar'
@@ -404,7 +518,14 @@ def test_get_preds():
 
 You can make the call `this_tests` anywhere in the test, so if the object becomes available at line 10 of the test, add `this_tests` after it.
 
-The test registry is located at `fastai/test_api_db.json` and it gets auto-generated when `pytest` gets a `--testapireg` flag, which is currently done when `make test-full` is run.
+And there is a special case for situations where a test doesn't test fastai API or it's a non-callable attribute, e.g. `learn.loss_func`, in which case use `na` (not applicable):
+```
+def test_non_fastai_func():
+    this_tests('na')
+```
+But we still want the call to be there, since we run a check to make sure we don't miss out on any tests, hence each test needs to have this call.
+
+The test registry is located at `fastai/test_registry.json` and it gets auto-generated or updated when `pytest` is run.
 
 
 ### Expensive object reuse
@@ -440,7 +561,7 @@ def path():
 @pytest.fixture(scope="module")
 def learn(path):
     data = ImageDataBunch.from_folder(path, ds_tfms=([], []), bs=2)
-    learn = create_cnn(data, models.resnet18, metrics=accuracy)
+    learn = cnn_learner(data, models.resnet18, metrics=accuracy)
     return learn
 
 def test_val_loss(learn):
@@ -632,6 +753,7 @@ and may have their own command line option to be used instead, which are defined
 ```
 custom options:
   --runslow             run slow tests
+  --runcpp              run cuda cpp extension tests
   --skipint             skip integration tests
 ```
 
@@ -903,6 +1025,7 @@ In some situations you may want to remove randomness for your tests. To get iden
 seed = 42
 
 # python RNG
+import random
 random.seed(seed)
 
 # pytorch RNGs

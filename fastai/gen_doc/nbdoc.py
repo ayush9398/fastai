@@ -1,6 +1,6 @@
 "`gen_doc.nbdoc` generates notebook documentation from module functions and links to correct places"
 
-import inspect,importlib,enum,os,re
+import inspect,importlib,enum,os,re,nbconvert
 from IPython.core.display import display, Markdown, HTML
 from nbconvert import HTMLExporter
 from IPython.core import page
@@ -10,8 +10,9 @@ from .docstrings import *
 from .core import *
 from ..torch_core import *
 from .nbtest import get_pytest_html
+from ..utils.ipython import IS_IN_COLAB
 
-__all__ = ['get_fn_link', 'link_docstring', 'show_doc', 'get_ft_names',
+__all__ = ['get_fn_link', 'link_docstring', 'show_doc', 'get_ft_names', 'md2html',
            'get_exports', 'show_video', 'show_video_from_youtube', 'import_mod', 'get_source_link',
            'is_enum', 'jekyll_note', 'jekyll_warn', 'jekyll_important', 'doc']
 
@@ -58,7 +59,7 @@ def type_repr(t):
     else: return link_type(t)
 
 def partial_repr(t):
-    args = (t.func,) + t.args + tuple([f'k={link_type(v)}' for k,v in t.keywords.items()])
+    args = (t.func,) + t.args + tuple([f'{k}={v}' for k,v in t.keywords.items()])
     reprs = ', '.join([link_type(o) for o in args])
     return f'<code>partial(</code>{reprs}<code>)</code>'
 
@@ -78,7 +79,7 @@ def format_param(p):
 def format_ft_def(func, full_name:str=None)->str:
     "Format and link `func` definition to show in documentation"
     sig = inspect.signature(func)
-    name = f'<code>{ifnone(full_name, func.__name__)}</code>'
+    name = f'<code>{full_name or func.__name__}</code>'
     fmt_params = [format_param(param) for name,param
                   in sig.parameters.items() if name not in ('self','cls')]
     arg_str = f"({', '.join(fmt_params)})"
@@ -100,10 +101,10 @@ def get_cls_doc(elt, full_name:str)->str:
     return name,args
 
 def show_doc(elt, doc_string:bool=True, full_name:str=None, arg_comments:dict=None, title_level=None, alt_doc_string:str='',
-             ignore_warn:bool=False, markdown=True, show_tests=False):
+             ignore_warn:bool=False, markdown=True, show_tests=True):
     "Show documentation for element `elt`. Supported types: class, Callable, and enum."
     arg_comments = ifnone(arg_comments, {})
-    anchor_id = full_name or get_anchor(elt)
+    anchor_id = get_anchor(elt)
     elt = getattr(elt, '__func__', elt)
     full_name = full_name or fn_name(elt)
     if inspect.isclass(elt):
@@ -112,17 +113,20 @@ def show_doc(elt, doc_string:bool=True, full_name:str=None, arg_comments:dict=No
     elif isinstance(elt, Callable):  name,args = format_ft_def(elt, full_name)
     else: raise Exception(f'doc definition not supported for {full_name}')
     source_link = get_function_source(elt) if is_fastai_class(elt) else ""
-    test_link, test_modal = get_pytest_html(elt, anchor_id=anchor_id, inline=True) if show_tests else ('', '')
+    test_link, test_modal = get_pytest_html(elt, anchor_id=anchor_id) if show_tests else ('', '')
     title_level = ifnone(title_level, 2 if inspect.isclass(elt) else 4)
-    doc =  f'<h{title_level} id="{anchor_id}">{name}{source_link}{test_link}</h{title_level}>'
-    doc += f'\n\n> {args}'
+    doc =  f'<h{title_level} id="{anchor_id}" class="doc_header">{name}{source_link}{test_link}</h{title_level}>'
+    doc += f'\n\n> {args}\n\n'
+    doc += f'{test_modal}'
     if doc_string and (inspect.getdoc(elt) or arg_comments):
         doc += format_docstring(elt, arg_comments, alt_doc_string, ignore_warn) + ' '
-    doc += '\n\n'
-    doc += f'{test_modal}' # hidden popup for tests doc. appending separately so it doesn't inherit css from <h{title_level}>
     if markdown: display(Markdown(doc))
     else: return doc
 
+def md2html(md):
+    if nbconvert.__version__ < '5.5.0': return HTMLExporter().markdown2html(md)
+    else: return HTMLExporter().markdown2html(defaultdict(lambda: defaultdict(dict)), md)
+    
 def doc(elt):
     "Show `show_doc` info in preview window along with link to full docs."
     global use_relative_links
@@ -131,11 +135,11 @@ def doc(elt):
     md = show_doc(elt, markdown=False)
     if is_fastai_class(elt):
         md += f'\n\n<a href="{get_fn_link(elt)}" target="_blank" rel="noreferrer noopener">Show in docs</a>'
-    output = HTMLExporter().markdown2html(md)
+    output = md2html(md)
     use_relative_links = True
-    try:    page.page({'text/html': output})
-    except: 
-        try:    get_ipython().run_cell_magic(u'HTML', u'', output)
+    if IS_IN_COLAB: get_ipython().run_cell_magic(u'html', u'', output)
+    else:
+        try: page.page({'text/html': output})
         except: display(Markdown(md))
 
 def format_docstring(elt, arg_comments:dict={}, alt_doc_string:str='', ignore_warn:bool=False)->str:
@@ -269,7 +273,7 @@ def get_anchor(fn)->str:
     return fn_name(fn)
 
 def fn_name(ft)->str:
-    if ft in _typing_names: return _typing_names[ft]
+    if ft.__hash__ and ft in _typing_names: return _typing_names[ft]
     if hasattr(ft, '__name__'):   return ft.__name__
     elif hasattr(ft,'_name') and ft._name: return ft._name
     elif hasattr(ft,'__origin__'): return str(ft.__origin__).split('.')[-1]
@@ -280,8 +284,6 @@ def get_fn_link(ft)->str:
     ft = getattr(ft, '__func__', ft)
     anchor = strip_fastai(get_anchor(ft))
     module_name = strip_fastai(get_module_name(ft))
-    func_name = strip_fastai(fn_name(ft))
-    if func_name.startswith('_'): return get_function_source(ft, display_text=None)
     base = '' if use_relative_links else FASTAI_DOCS
     return f'{base}/{module_name}.html#{anchor}'
 
